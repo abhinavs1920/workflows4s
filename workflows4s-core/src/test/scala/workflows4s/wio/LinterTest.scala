@@ -82,5 +82,28 @@ class LinterTest extends AnyFreeSpec with Matchers {
         result.warnings.shouldBe(empty)
       }
     }
+
+    "should detect useless error handlers" - {
+      "when attached to WIO.End" in {
+        val end = TestCtx2.WIO.end
+
+        val workflow = end.handleErrorWith(TestUtils.errorHandler)
+
+        val result = Linter.lint(workflow)
+        result.isValid.shouldBe(true)
+        result.warnings.should(have.size(1))
+        result.warnings.head.shouldBe(a[LintWarning.UselessErrorHandler])
+      }
+
+      "should not warn when error handler is attached to error-raising WIO" in {
+        val (_, errorWio) = TestUtils.errorIO
+
+        val workflow = errorWio.handleErrorWith(TestUtils.errorHandler)
+
+        val result = Linter.lint(workflow)
+        result.isValid.shouldBe(true)
+        result.warnings.shouldBe(empty)
+      }
+    }
   }
 }

@@ -4,6 +4,7 @@ package workflows4s.wio
   *
   * The linter performs static analysis to identify:
   *   - Busy loops: Loops without timers or signals that could cause infinite execution
+  *   - Useless error handlers: Error handlers attached to WIO that cannot raise errors
   *
   * Note: Clashing events detection is complex and requires runtime information about event types. This is left for future enhancement.
   */
@@ -32,6 +33,11 @@ object Linter {
         val name = loopName.map(n => s" '$n'").getOrElse("")
         s"Loop$name at path '$path' does not contain any timers or signals. This may cause busy-waiting and excessive resource usage."
       }
+    }
+
+    case class UselessErrorHandler(path: String) extends LintWarning {
+      override def message: String =
+        s"Error handler at path '$path' is attached to a WIO that cannot raise errors (Err = Nothing). This error handler will never be invoked."
     }
   }
 
@@ -83,12 +89,22 @@ object Linter {
         visit(second)
 
       case WIO.HandleError(base, _, _, _) =>
+        // Check if base can raise errors
+        if cannotRaiseErrors(base) then {
+          val loopPath = currentPath.mkString(" -> ")
+          warnings = LintWarning.UselessErrorHandler(loopPath) :: warnings
+        }
         withPath("base") {
           visit(base)
         }
       // handleError is a function, can't visit without executing
 
       case WIO.HandleErrorWith(base, handleError, _, _) =>
+        // Check if base can raise errors
+        if cannotRaiseErrors(base) then {
+          val loopPath = currentPath.mkString(" -> ")
+          warnings = LintWarning.UselessErrorHandler(loopPath) :: warnings
+        }
         withPath("base") {
           visit(base)
         }
@@ -172,6 +188,33 @@ object Linter {
       case WIO.Retry(base, _)                       => containsTimerOrSignal(base)
       case WIO.Checkpoint(base, _, _)               => containsTimerOrSignal(base)
       case _                                        => false
+    }
+
+    private def cannotRaiseErrors[In, Err, Out <: WCState[Ctx]](wio: WIO[In, Err, Out, Ctx]): Boolean = wio match {
+      // WIO types that explicitly cannot raise errors (Err = Nothing)
+      case _: WIO.HandleSignal[?, ?, ?, ?, ?, ?, ?] => false // Can raise errors
+      case _: WIO.RunIO[?, ?, ?, ?, ?]              => false // Can raise errors
+      case _: WIO.Pure[?, ?, ?, ?]                  => false // Can raise errors
+      case _: WIO.Timer[?, ?, ?, ?]                 => false // Can raise errors
+      case _: WIO.AwaitingTime[?, ?, ?, ?]          => false // Can raise errors
+      case _: WIO.End[?]                            => true  // Cannot raise errors (Err = Nothing)
+      case _: WIO.Executed[?, ?, ?, ?]              => false // Can raise errors
+      case _: WIO.Discarded[?, ?]                   => true  // Cannot raise errors (Err = Nothing)
+      case _: WIO.Recovery[?, ?, ?, ?, ?]           => false // Can raise errors
+
+      // Composite types - check recursively
+      case WIO.FlatMap(base, _, _)               => cannotRaiseErrors(base)
+      case WIO.AndThen(first, second)            => cannotRaiseErrors(first) && cannotRaiseErrors(second)
+      case WIO.HandleError(_, _, _, _)           => false // Result of error handling can still raise errors
+      case WIO.HandleErrorWith(_, _, _, _)       => false // Result of error handling can still raise errors
+      case WIO.Loop(body, _, onRestart, _, _, _) => cannotRaiseErrors(body) && cannotRaiseErrors(onRestart)
+      case WIO.Fork(branches, _, _)              => branches.forall(b => cannotRaiseErrors(b.wio))
+      case WIO.Parallel(elements, _, _)          => elements.forall(e => cannotRaiseErrors(e.wio))
+      case WIO.HandleInterruption(base, _, _, _) => cannotRaiseErrors(base)
+      case WIO.Retry(base, _)                    => cannotRaiseErrors(base)
+      case WIO.Checkpoint(base, _, _)            => cannotRaiseErrors(base)
+      case WIO.Transform(base, _, _)             => cannotRaiseErrors(base)
+      case _                                     => false // Conservative: assume it can raise errors
     }
   }
 }
